@@ -1,0 +1,136 @@
+;=======================================================================
+; Function: extract_kmers
+;
+; Description:
+;   Given an input sequence (e.g. a DNA string), this routine extracts all
+;   contiguous k-mers (substrings of length k) and computes a hash value for
+;   each by encoding A, C, G, and T into 0, 1, 2, and 3 (using 2 bits per char).
+;   The hash for a k-mer is computed as the concatenation of the 2-bit codes.
+;
+; Calling Convention (SysV AMD64):
+;   rdi = pointer to sequence (array of characters)
+;   rsi = length of the sequence (number of characters)
+;   rdx = k (length of each k-mer, assumed to be >0 and small enough so that 2*k ≤ 64)
+;   rcx = pointer to an output array (of 64-bit integers) to store each k-mer hash
+;
+; The routine computes the hash for the first k-mer and then uses a rolling hash
+; update to compute each subsequent k-mer:
+;
+;   new_hash = ((old_hash & mask) << 2) | new_nucleotide
+;
+; where mask = (1 << (2*(k-1))) - 1.
+;
+; Note:
+;   It is assumed that the sequence contains only valid nucleotides 'A', 'C',
+;   'G', and 'T'. (Any other character will be mapped to 0 by the lookup table.)
+;
+;-----------------------------------------------------------------------
+global extract_kmers
+section .text
+
+extract_kmers:
+    ; Save callee–saved registers (rbx, r12, r13, r15 are used)
+    push    rbx
+    push    r12
+    push    r13
+    push    r15
+
+    ; rdi = pointer to sequence
+    ; rsi = length of sequence
+    ; rdx = k (k-mer length)
+    ; rcx = pointer to output array
+
+    ; Save output pointer into r15 and k into r11
+    mov     r15, rcx       ; r15 will be our output pointer
+    mov     r11, rdx       ; r11 = k
+
+    ; If (length < k) then nothing to do.
+    cmp     rsi, r11
+    jl      .done
+
+    ;---------------------------------------------
+    ; Precompute mask for rolling hash update.
+    ; We need:
+    ;   high_factor = 1 << (2*(k-1))
+    ;   mask = high_factor - 1
+    ;---------------------------------------------
+    mov     r10, r11       ; r10 = k
+    dec     r10            ; r10 = k - 1
+    shl     r10, 1         ; r10 = 2*(k - 1)
+    mov     r9, 1          ; r9 will hold high_factor
+    mov     cl, r10b       ; use lower 8 bits of r10 as shift count (k is assumed small)
+    shl     r9, cl         ; r9 = 1 << (2*(k-1))
+    mov     r10, r9        ; copy high_factor into r10...
+    dec     r10            ; ...so that r10 = mask = (1 << (2*(k-1))) - 1
+
+    ;---------------------------------------------
+    ; Compute the hash for the first k-mer.
+    ;---------------------------------------------
+    xor     rax, rax       ; rax will hold the hash value (start at 0)
+    mov     rbx, rdi       ; rbx = pointer to current character in the sequence
+    mov     r12, r11       ; r12 = k (loop counter)
+
+.loop_init:
+    movzx   r8, byte [rbx]       ; load current character (ASCII)
+    ; Convert the nucleotide character to a 2-bit value using a lookup table.
+    movzx   r8, byte [nuc_table + r8]
+    shl     rax, 2             ; shift hash left 2 bits
+    or      rax, r8            ; incorporate nucleotide value
+    inc     rbx                ; next character in the sequence
+    dec     r12
+    jnz     .loop_init
+
+    ; Store the hash for the first k-mer into the output array.
+    mov     [r15], rax
+    add     r15, 8           ; move to next 64-bit output slot
+
+    ;---------------------------------------------
+    ; Set up loop to process the remaining (length - k) k-mers.
+    ;---------------------------------------------
+    mov     r13, rsi       ; r13 = total sequence length
+    sub     r13, r11       ; r13 = (length - k) = number of k-mers remaining
+
+.rolling_loop:
+    ; Rolling update:
+    ; Remove the leftmost nucleotide by taking (hash & mask)
+    and     rax, r10       ; r10 = mask = (1 << (2*(k-1))) - 1
+    shl     rax, 2        ; make room for the new nucleotide (shift left 2 bits)
+    movzx   r8, byte [rbx]      ; load the new nucleotide character
+    movzx   r8, byte [nuc_table + r8]   ; convert it to its 2-bit code
+    or      rax, r8       ; add the new nucleotide into the hash
+    inc     rbx         ; move to the next character in the sequence
+
+    ; Store the new k-mer hash value.
+    mov     [r15], rax
+    add     r15, 8
+    dec     r13
+    jnz     .rolling_loop
+
+.done:
+    pop     r15
+    pop     r13
+    pop     r12
+    pop     rbx
+    ret
+
+;=======================================================================
+; Data: Lookup table for nucleotide conversion.
+; The table maps an ASCII character (0–255) to its 2-bit value.
+; Only the following entries are set:
+;   'A' (ASCII 65) -> 0
+;   'C' (ASCII 67) -> 1
+;   'G' (ASCII 71) -> 2
+;   'T' (ASCII 84) -> 3
+; All other entries are 0.
+;=======================================================================
+section .data
+nuc_table:
+    times 65 db 0         ; indices 0 .. 64 are 0
+    db 0                  ; index 65: 'A' = 0
+    db 0                  ; index 66 (unused)
+    db 1                  ; index 67: 'C' = 1
+    times 3 db 0          ; indices 68, 69, 70 are 0
+    db 2                  ; index 71: 'G' = 2
+    times (84-72) db 0    ; indices 72 .. 83 are 0
+    db 3                  ; index 84: 'T' = 3
+    times (256-85) db 0   ; fill the rest up to 256 bytes
